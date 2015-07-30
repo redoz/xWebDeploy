@@ -9,6 +9,22 @@
 # the package is deployed and return the result
 #########################################################################################################################################
 
+Add-PSSnapin -Name WDeploySnapin3.0
+
+function Get-DeploymentParameters([string]$Package, [Hashtable]$Parameters) {
+    $parameterSet = Get-WDParameters -FilePath $Package
+    
+    Write-Verbose -Message ("Default package paramters: " + ($parameterSet | Format-Table -AutoSize | Out-String)) -Verbose
+    
+    foreach ($kvp in $Parameters.GetEnumerator()) {
+        $parameterSet[$kvp.Key] = $kvp.Value;
+    }
+    
+    Write-Verbose -Message ("Package paramters: " + ($parameterSet | Format-Table -AutoSize | Out-String)) -Verbose
+    
+    return $parameterSet;
+}
+
 function Get-TargetResource
 {
     [CmdletBinding()]
@@ -17,44 +33,30 @@ function Get-TargetResource
     (
         [parameter(Mandatory = $true)]
         [System.String]
-        $SourcePath,
+        $Package,
 
-       [parameter(Mandatory = $true)]
-        [System.String]
-        $Destination
+        [Hashtable]
+        $Parameters= @{}
     )
-
-    $appCmd = "$env:PROGRAMFILES\IIS\Microsoft Web Deploy V3\msdeploy.exe"
     $ensure = "Absent"
-    Write-Verbose -Message "Calling msdeploy.exe to retrieve the site content in a zip file format"
-      & $appCmd -verb:sync "-source:contentPath=$Destination" "-dest:package=$SourcePath" 
-
-    # $Destination in this case points to website content full path.
-    if(Test-Path($Destination))
-    {
+        
+    $parameterSet = Get-DeploymentParameters -Package $Package -Parameters $Parameters
+    
+    $changeSummary = Restore-WDPackage -Package $Package -Parameters $Parameters -WhatIf
+    
+    Write-Verbose -Message ("Change summary: " + ($changeSummary | Out-String))
+    
+    if ($changeSummary.TotalChanges -eq 0) {
         $ensure = "Present"
-    }        
-    else
-    {
-        # this is the case where $Destination points to IIS website name and not the website content path
-        $site = Get-ItemProperty -Path "IIS:\Sites\$Destination" -ErrorAction SilentlyContinue
-        if ($site -ne $null)
-        {
-           $path = $site.physicalPath           
-           if(Test-Path($path))
-           {
-             $ensure = "Present"
-           }
-        }
     }
 
     $returnValue = @{
-    SourcePath = $SourcePath
-    Destination = $Destination            
-    Ensure = $ensure}    
+        Package = $Package         
+        Parameters = $Parameters
+        Ensure = $ensure
+    }    
 
     $returnValue
-    
 }
 
 #########################################################################################################################################
@@ -69,62 +71,29 @@ function Set-TargetResource
     (
         [parameter(Mandatory = $true)]
         [System.String]
-        $SourcePath,
+        $Package,
 
-        [parameter(Mandatory = $true)]
-        [System.String]
-        $Destination,
+        [Hashtable]
+        $Parameters= @{}
         
-          [ValidateSet("Present","Absent")]
+        [ValidateSet("Present","Absent")]
         [System.String]
         $Ensure = "Present"
     )
 
-    Write-Verbose -Message "Calling msdeploy.exe to sync the site content from a given zip package"
-
-    $app = "$env:PROGRAMFILES\IIS\Microsoft Web Deploy V3"
-
-    $appCmd = Join-Path $app -ChildPath "msdeploy.exe"
-    $appCmd = "& '$appCmd'"   
-        
+    $parameterSet = Get-DeploymentParameters -Package $Package -Parameters $Parameters
+    
     if($Ensure -eq "Present")
-    {
-        #sync the given package content into iis
-        
-        if($Destination -contains "\")
-        {
-              #this is the case when iis site content path is specified
-             $appCmd += "-verb:sync -source:package=$SourcePath -dest:contentPath=$Destination"
-        }
-        else
-        {
-            #this is the case when iis site name is specified
-            $appCmd += "-verb:sync -source:package=$SourcePath -dest:iisApp=$Destination"           
-        }
-        Write-Verbose -Message $appCmd
-        Invoke-Expression $appCmd
-
+    {     
+        $changeSummary = Restore-WDPackage -Package $Package -Parameters $Parameters
+        Write-Verbose -Message ("Change summary: " + ($changeSummary | Out-String))
     }
     else
     {
       #delete the website content    
-      if($Destination -contains "\")
-      {
-        # $SourcePath in this case points to physical path of the website.
-          Remove-Item -Path $Destination -Recurse -ErrorAction SilentlyContinue 
-      }      
-      else
-      {
-        # this is the case where $SourcePath points to IIS website name and not the actual path
-        $site = Get-ItemProperty -Path "IIS:\Sites\$Destination" -ErrorAction SilentlyContinue
-        if ($site -ne $null)
-        {
-           $path = $site.physicalPath
-           $files = Get-Item -Path $path -ErrorAction SilentlyContinue           
-           Remove-Item -Path $files -Recurse -ErrorAction SilentlyContinue 
-        }
-      }  
-
+      # & 'C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe' -verb:delete -source:package=C:\temp\pkg\wdtest.zip -dest:auto
+      # but some providers aren't supported, but the rest we should be able to delete
+      Write-Host "Not supported"
     }    
 }
 
@@ -141,59 +110,31 @@ function Test-TargetResource
     (
         [parameter(Mandatory = $true)]
         [System.String]
-        $SourcePath,
+        $Package,
 
-        [parameter(Mandatory = $true)]
-        [System.String]
-        $Destination,
+        [Hashtable]
+        $Parameters= @{}
 
         [ValidateSet("Present","Absent")]
         [System.String]
         $Ensure = "Present"
     )
     $result = $false    
-    $appCmd = "$env:PROGRAMFILES\IIS\Microsoft Web Deploy V3\msdeploy.exe"
 
-    #get all the files from a given package
-    $packageFiles = & $appCmd -verb:dump "-source:package=$SourcePath"
- 
+    $parameterSet = Get-DeploymentParameters -Package $Package -Parameters $Parameters
+
     if($Ensure -eq "Present")
     {
-         #find all the files for a given site
-        $siteFiles = & $appCmd -verb:dump "-source:contentPath=$Destination"
-        # the packages exported using webdeploy tool, contain 2 extra entries with site name. Skipping those..
-        #compare based on the number of files
-        if(($packageFiles.Count -eq $siteFiles.Count) -or (($packageFiles.Count -2) -eq $siteFiles.Count) )
-        {
-            $result = $true
-        }
+        $changeSummary = Restore-WDPackage -Package $Package -Parameters $Parameters -WhatIf
+        
+        Write-Verbose -Message ("Change summary: " + ($changeSummary | Out-String))
+        
+        $result = $changeSummary.TotalChanges -eq 0;
      }   
     else
     {       
-        #find the website's physical path if $Destination points to a site name
-        $site = Get-ItemProperty -Path "IIS:\Sites\$Destination" -ErrorAction SilentlyContinue
-        if ($site -ne $null)
-        {
-           $path = $site.physicalPath
-           $files = Get-Item -Path $path -ErrorAction SilentlyContinue
-           if ($files -ne $null)
-            {
-                $f = $files.GetFiles()
-            }
-            if($f.Count >1)
-            {
-                $result = $true
-            }            
-        }
-        #this is the case when $Destination points to the website's physical path 
-        else
-        {
-            if(Test-Path($Destination))
-            {
-                $result = $true
-            } 
-        }
-     }
+        Write-Host "Not supported"
+    }
     $result    
 }
 
